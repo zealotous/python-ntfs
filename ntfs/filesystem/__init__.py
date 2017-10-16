@@ -1,6 +1,8 @@
 import sys
 import logging
 
+import math
+
 from ntfs.BinaryParser import Block
 from ntfs.BinaryParser import OverrunBufferException
 from ntfs.mft.MFT import InvalidRecordException
@@ -454,10 +456,6 @@ class NonResidentAttributeData(object):
         """
         # TODO: there are some pretty bad inefficiencies here, i believe
         # TODO: clarify variable names and their units
-        ret = bytearray()
-        virt_byte_offset = 0
-        have_found_start = False
-
         g_logger.debug("NonResidentAttributeData: getslice: "
                        "start: %x end: %x", start, stop)
         _len = len(self)
@@ -476,7 +474,13 @@ class NonResidentAttributeData(object):
                              start, stop, _len)
         clusters = self._clusters
         csize = clusters.get_cluster_size()
-        for cluster_offset, num_clusters in self._runentries:
+
+        ret = bytearray()
+        virt_cluster_offset = 0
+        virt_byte_offset = 0
+        have_found_start = False
+
+        for run, (cluster_offset, num_clusters) in enumerate(self._runentries):
             g_logger.debug("NonResidentAttributeData: "
                            "getslice: runentry: start: %x len: %x",
                            cluster_offset * csize, num_clusters * csize)
@@ -493,14 +497,25 @@ class NonResidentAttributeData(object):
                     continue
 
             cluster_stop = cluster_offset + num_clusters
-            _bytes = clusters[cluster_offset:cluster_stop]
 
             is_stop_in_run = stop <= virt_byte_stop
             # This is the situation when we have only one data run
             # everything is in this run
             if is_start_in_run and is_stop_in_run:
-                return _bytes[start:stop]
+                # start bytes related to datarun clusters
+                _start = start - virt_byte_offset
+                _stop = stop - virt_byte_offset
 
+                cstop = int(math.ceil(float(_stop)/csize))
+                cstart = _start/csize
+                abs_start = cluster_offset + cstart
+                abs_stop = cluster_offset + cstop
+                _bytes = clusters[abs_start:abs_stop]
+                # byte offset relative to virtual clusters
+                rbyte_offset = (start/csize)*csize
+                return _bytes[start - rbyte_offset:stop - rbyte_offset]
+
+            _bytes = clusters[cluster_offset:cluster_stop]
             _start = _stop = None
             if is_start_in_run:
                 _start = start - virt_byte_offset
@@ -510,6 +525,7 @@ class NonResidentAttributeData(object):
             # then copy all bytes from the data run's clusters
             # _bytes[None:None] === _bytes[:]
             ret.extend(_bytes[_start:_stop])
+            virt_cluster_offset += num_clusters
             virt_byte_offset += run_byte_len
 
         return ret
@@ -561,12 +577,13 @@ class NTFSFilesystem(object):
                 g_logger.error("failed to read MFTMirr from image: %s", e)
                 raise CorruptNTFSFilesystemError("failed to read MFT or MFTMirr from image")
 
-        if len(b) > 1024 * 1024 * 500:
-            self._mft_data = b
-        else:
-            # note optimization: copy entire mft buffer from NonResidentNTFSAttribute
-            #  to avoid getslice lookups
-            self._mft_data = b[:]
+        # if len(b) > 1024 * 1024 * 500:
+        #     self._mft_data = b
+        # else:
+        #     # note optimization: copy entire mft buffer from NonResidentNTFSAttribute
+        #     #  to avoid getslice lookups
+        #     self._mft_data = b[:]
+        self._mft_data = b
         self._enumerator = MFTEnumerator(self._mft_data)
 
         # test there's at least some user content (aside from root), or we'll
